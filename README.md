@@ -92,6 +92,34 @@ Generates 100,000 synthetic applications through the full pipeline and writes:
 - results/sample_run_summary.json - aggregate stats
 - results/sample_run_report.txt   - human-readable report
 
+## Ollama Simulation Runner
+
+A resource-controlled runner for testing the pipeline against the real Ollama llama3.2 model
+without overwhelming your machine. Replaces the old `run_ollama_sample.py`.
+
+```bash
+python scripts/run_ollama_sim.py \
+  --total 10 \
+  --batch-size 5 \
+  --timeout 30 \
+  --concurrency 1 \
+  --batch-pause 2 \
+  --retries 2
+```
+
+| Flag            | Default | Description                                      |
+|-----------------|---------|--------------------------------------------------|
+| --total         | 10      | Number of applications to process                |
+| --batch-size    | 5       | Applications per batch                           |
+| --timeout       | 30.0    | Per-call LLM timeout in seconds                  |
+| --concurrency   | 1       | Max simultaneous LLM calls                       |
+| --batch-pause   | 2.0     | Seconds to sleep between batches                 |
+| --retries       | 2       | Max retry attempts per call (exponential backoff)|
+
+Outputs: `results/ollama_run_summary.json` and `results/ollama_run_report.txt`
+
+Requires Ollama running locally: `ollama serve` with `llama3.2` pulled.
+
 ## Environment Variables
 
 | Variable        | Default | Description                              |
@@ -122,7 +150,8 @@ credit-fraud-platform/
  frontend/
     src/App.jsx              # React analyst workbench
  scripts/
-    run_sample_data.py       # 100k sample data runner
+    run_sample_data.py       # 100k sample data runner (mock LLM)
+    run_ollama_sim.py        # Resource-controlled Ollama simulation runner
  infrastructure/
     docker/
        docker-compose.yml   # Local dev stack
@@ -131,10 +160,11 @@ credit-fraud-platform/
         free_tier.tf         # AWS Free Tier resources
         variables.tf
  tests/
-    test_properties.py       # Property-based tests (Hypothesis)
-    test_rules_engine.py     # Rule engine unit tests
-    test_llm_mock.py         # LLM mock determinism tests
-    test_graph_mock.py       # Graph analyzer tests
+    test_properties.py           # Property-based tests (Hypothesis) — core pipeline
+    test_ollama_sim_properties.py # Property-based tests — Ollama simulation runner
+    test_rules_engine.py         # Rule engine unit tests
+    test_llm_mock.py             # LLM mock determinism tests
+    test_graph_mock.py           # Graph analyzer tests
  .env.example
  requirements.txt
 ```
@@ -148,6 +178,10 @@ pytest tests/ -v
 
 25 tests pass including property-based tests covering SSN hashing, rule engine
 invariants, model score bounds, policy threshold routing, and graph risk bounds.
+
+The Ollama simulation runner adds 10 property-based tests covering timeout bounds,
+concurrency caps, batch pause enforcement, retry count bounds, result completeness,
+and graceful interrupt handling.
 
 ## Deploy to AWS Free Tier
 
