@@ -1,0 +1,72 @@
+========================================================================
+  CREDIT FRAUD MVP — FULL PIPELINE RUN REPORT
+========================================================================
+  Pipeline stages  : Graph > ML > Rules > Intake > LLM > Policy > Audit
+  Applications     :    100,000
+  Elapsed          :       69.9s
+  Throughput       :      1,430 apps/sec
+  Total loan vol   : $2,998,868,877.97
+
+  OPERATIONAL STATUS
+  --------------------------------------------------
+  approved                       85,052  ( 85.1%)
+  manual_review                   9,929  (  9.9%)
+  fraud_escalation                5,019  (  5.0%)
+
+  FRAUD LABEL (LLM)
+  --------------------------------------------------
+  none                                     85,052  ( 85.1%)
+  related_party_risk                        7,940  (  7.9%)
+  suspected_proxy_borrower                  3,999  (  4.0%)
+  suspected_coordinated_fraud               1,968  (  2.0%)
+  suspected_identity_misuse                 1,041  (  1.0%)
+
+  CASE TYPE (LLM)
+  --------------------------------------------------
+  independent_credit_risk                  85,052  ( 85.1%)
+  related_party_risk                        7,940  (  7.9%)
+  suspected_proxy_borrower                  3,999  (  4.0%)
+  suspected_coordinated_fraud               1,968  (  2.0%)
+  suspected_identity_misuse                 1,041  (  1.0%)
+
+  SCENARIO BREAKDOWN
+  --------------------------------------------------
+  clean                  n= 85,052  approved=100.0%  review=  0.0%  escalated=  0.0%
+  related_party          n=  4,872  approved=  0.0%  review=100.0%  escalated=  0.0%
+  proxy_borrower         n=  3,999  approved=  0.0%  review=100.0%  escalated=  0.0%
+  fund_flow              n=  3,068  approved=  0.0%  review=  0.5%  escalated= 99.5%
+  coordinated_fraud      n=  1,968  approved=  0.0%  review=  0.1%  escalated= 99.9%
+  identity_misuse        n=  1,041  approved=  0.0%  review=100.0%  escalated=  0.0%
+
+  RULE ENGINE
+  --------------------------------------------------
+  Total rule hits          :     40,257
+  Critical hits            :     12,421
+  Avg hits per application :       0.40
+
+  PRIORITY DISTRIBUTION
+  --------------------------------------------------
+  Priority 10  FRAUD_ESC(4h)         5,019  (  5.0%)
+  Priority 25  CRIT_RULE(12h)        9,903  (  9.9%)
+  Priority 30  HIGH_PD(24h)             26  (  0.0%)
+  Priority 50  STANDARD(48h)        85,052  ( 85.1%)
+
+  TOP ADVERSE ACTION CODES
+  --------------------------------------------------
+  RELATED_PARTY_DEFAULT                 14,948
+  PROXY_BORROWER_RISK                   10,104
+  1                                      7,512
+  FUND_FLOW_ANOMALY                      5,036
+
+  LOAN EXPOSURE
+  --------------------------------------------------
+  Total portfolio          : $2,998,868,877.97
+  Under manual review      : $787,033,773.63  (26.2%)
+  Fraud escalated          : $364,321,965.04  (12.1%)
+
+  OUTPUT FILES
+  --------------------------------------------------
+  CSV  : C:\Users\USER\Downloads\credit\credit-fraud-platform\results\sample_run_results.csv
+  JSON : C:\Users\USER\Downloads\credit\credit-fraud-platform\results\sample_run_summary.json
+  TXT  : C:\Users\USER\Downloads\credit\credit-fraud-platform\results\sample_run_report.txt
+========================================================================

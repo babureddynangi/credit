@@ -1,0 +1,113 @@
+{
+  "run_date": "2026-03-23T05:12:13.666546+00:00",
+  "total_applications": 100000,
+  "elapsed_seconds": 69.9,
+  "throughput_per_sec": 1430.3,
+  "pipeline_stages": [
+    "graph_analysis",
+    "ml_scoring",
+    "rule_engine",
+    "intake_validation",
+    "llm_classification",
+    "policy_mapping",
+    "audit_log"
+  ],
+  "total_loan_volume": 2998868877.97,
+  "review_loan_volume": 787033773.63,
+  "escalated_loan_volume": 364321965.04,
+  "rule_hits_total": 40257,
+  "critical_hits_total": 12421,
+  "operational_status": {
+    "approved": 85052,
+    "manual_review": 9929,
+    "fraud_escalation": 5019
+  },
+  "fraud_label": {
+    "none": 85052,
+    "related_party_risk": 7940,
+    "suspected_coordinated_fraud": 1968,
+    "suspected_proxy_borrower": 3999,
+    "suspected_identity_misuse": 1041
+  },
+  "case_type": {
+    "independent_credit_risk": 85052,
+    "related_party_risk": 7940,
+    "suspected_coordinated_fraud": 1968,
+    "suspected_proxy_borrower": 3999,
+    "suspected_identity_misuse": 1041
+  },
+  "priority_distribution": {
+    "10": 5019,
+    "25": 9903,
+    "30": 26,
+    "50": 85052
+  },
+  "adverse_action_codes": {
+    "RELATED_PARTY_DEFAULT": 14948,
+    "PROXY_BORROWER_RISK": 10104,
+    "1": 7512,
+    "FUND_FLOW_ANOMALY": 5036
+  },
+  "scenario_breakdown": {
+    "clean": {
+      "total": 85052,
+      "approved": 85052,
+      "manual_review": 0,
+      "hold": 0,
+      "fraud_escalation": 0,
+      "declined": 0,
+      "rule_hits": 0,
+      "critical_hits": 0
+    },
+    "related_party": {
+      "total": 4872,
+      "approved": 0,
+      "manual_review": 4872,
+      "hold": 0,
+      "fraud_escalation": 0,
+      "declined": 0,
+      "rule_hits": 11669,
+      "critical_hits": 4214
+    },
+    "fund_flow": {
+      "total": 3068,
+      "approved": 0,
+      "manual_review": 15,
+      "hold": 0,
+      "fraud_escalation": 3053,
+      "declined": 0,
+      "rule_hits": 10427,
+      "critical_hits": 3068
+    },
+    "coordinated_fraud": {
+      "total": 1968,
+      "approved": 0,
+      "manual_review": 2,
+      "hold": 0,
+      "fraud_escalation": 1966,
+      "declined": 0,
+      "rule_hits": 10067,
+      "critical_hits": 1968
+    },
+    "proxy_borrower": {
+      "total": 3999,
+      "approved": 0,
+      "manual_review": 3999,
+      "hold": 0,
+      "fraud_escalation": 0,
+      "declined": 0,
+      "rule_hits": 5702,
+      "critical_hits": 2433
+    },
+    "identity_misuse": {
+      "total": 1041,
+      "approved": 0,
+      "manual_review": 1041,
+      "hold": 0,
+      "fraud_escalation": 0,
+      "declined": 0,
+      "rule_hits": 2392,
+      "critical_hits": 738
+    }
+  }
+}
