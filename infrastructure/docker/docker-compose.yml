@@ -1,0 +1,58 @@
+# infrastructure/docker/docker-compose.yml
+# Free-tier MVP stack — no Ray, no Kafka, no Redis
+# Uses MOCK_LLM=true and GRAPH_BACKEND=mock for zero external dependencies
+
+version: "3.9"
+
+services:
+
+  # ─── PostgreSQL (mirrors RDS db.t3.micro) ─────────────────────────────────
+  postgres:
+    image: postgres:15
+    ports: ["5432:5432"]
+    environment:
+      POSTGRES_DB: credit_fraud
+      POSTGRES_USER: cfadmin
+      POSTGRES_PASSWORD: localdev_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init_db.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cfadmin -d credit_fraud"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ─── FastAPI Application ───────────────────────────────────────────────────
+  api:
+    build:
+      context: ../../
+      dockerfile: infrastructure/docker/Dockerfile.api
+    ports: ["8000:8000"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql://cfadmin:localdev_password@postgres:5432/credit_fraud
+      MOCK_LLM: "true"
+      GRAPH_BACKEND: "mock"
+      ALLOWED_ORIGINS: "http://localhost:3000"
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-mock-key}
+    volumes:
+      - ../../:/app
+    command: uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ─── React Frontend ────────────────────────────────────────────────────────
+  frontend:
+    image: node:20-alpine
+    working_dir: /app
+    ports: ["3000:3000"]
+    depends_on: [api]
+    environment:
+      VITE_API_URL: http://localhost:8000
+    volumes:
+      - ../../frontend:/app
+    command: sh -c "npm install && npm run dev -- --host"
+
+volumes:
+  postgres_data:
