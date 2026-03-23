@@ -1,4 +1,4 @@
-﻿# Credit Fraud Detection Platform - AWS Free Tier MVP
+# Credit Fraud Detection Platform - AWS Free Tier MVP
 
 A US-compliant credit fraud detection platform with graph-based related-party analysis,
 deterministic rule engine, LLM-assisted case classification, and a human-in-the-loop
@@ -65,32 +65,47 @@ Priority SLA distribution:
 
 ## Local Development (No AWS Required)
 
+The platform supports a production-realistic local MVP using **Ollama** (for LLM) and **Neo4j** (for Graph analytics), with a live React frontend.
+
+### Option 1: With Docker (Recommended)
+
+Automatically spins up the API, Frontend, PostgreSQL, Neo4j, Ollama, and data seed runners.
+
 ```bash
-# 1. Copy env file
 cp .env.example .env.local
-
-# 2. Start services
-docker-compose -f infrastructure/docker/docker-compose.yml up -d
-
-# 3. API at http://localhost:8000
-# 4. Frontend at http://localhost:3000
-# 5. API docs at http://localhost:8000/docs
+docker-compose -f infrastructure/docker/docker-compose.yml up --build
 ```
 
-With MOCK_LLM=true and GRAPH_BACKEND=mock (defaults), the full 7-stage pipeline
-runs without any external services or API keys.
+- **Frontend Workbench:** `http://localhost:3000`
+- **API Docs:** `http://localhost:8000/docs`
+- **Neo4j Browser:** `http://localhost:7474` (neo4j / localdev_password)
+
+### Option 2: Without Docker (In-Memory Fallback)
+
+If Docker isn't installed, the API falls back to an in-memory store automatically when `DATABASE_URL` is empty.
+
+```bash
+# 1. Start the API (Terminal 1)
+$env:GRAPH_BACKEND="mock"; $env:DATABASE_URL=""; python -m uvicorn api.main:app --port 8000
+
+# 2. Start the Frontend (Terminal 2)
+cd frontend
+npm install
+npm run dev
+```
+
+## Realistic Pipeline Runner
+
+You can run a batch of synthetic loan applications through the full pipeline using your local Ollama instance (no cloud needed).
+
+```bash
+python scripts/run_realistic_mvp.py --total 10 --batch-size 5
+```
+*(Requires `ollama serve` running locally with the `llama3.2` model pulled)*
+
+Outputs a detailed summary of LLM case classifications, latencies, and fraud labels.
 
 ## Run Sample Data
-
-```bash
-cd credit-fraud-platform
-python scripts/run_sample_data.py
-```
-
-Generates 100,000 synthetic applications through the full pipeline and writes:
-- results/sample_run_results.csv  - 50-column per-application dataset
-- results/sample_run_summary.json - aggregate stats
-- results/sample_run_report.txt   - human-readable report
 
 ## Ollama Simulation Runner
 

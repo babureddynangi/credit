@@ -1,6 +1,6 @@
 # infrastructure/docker/docker-compose.yml
-# Free-tier MVP stack — no Ray, no Kafka, no Redis
-# Uses MOCK_LLM=true and GRAPH_BACKEND=mock for zero external dependencies
+# Realistic MVP stack — PostgreSQL + Neo4j + Ollama + FastAPI + React
+# All services run locally via Docker Compose with zero cloud costs
 
 version: "3.9"
 
@@ -23,6 +23,70 @@ services:
       timeout: 5s
       retries: 10
 
+  # ─── Neo4j Graph Database ──────────────────────────────────────────────────
+  neo4j:
+    image: neo4j:5-community
+    ports:
+      - "7474:7474"    # Browser UI
+      - "7687:7687"    # Bolt protocol
+    environment:
+      NEO4J_AUTH: neo4j/localdev_password
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_apoc_import_file_enabled: "true"
+    volumes:
+      - neo4j_data:/data
+      - ./init_neo4j.cypher:/var/lib/neo4j/import/init_neo4j.cypher
+    healthcheck:
+      test: ["CMD", "neo4j", "status"]
+      interval: 10s
+      timeout: 10s
+      retries: 15
+      start_period: 30s
+
+  # ─── Neo4j Seed Runner (runs once then exits) ──────────────────────────────
+  neo4j-seed:
+    image: neo4j:5-community
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    volumes:
+      - ./init_neo4j.cypher:/seed/init_neo4j.cypher
+    entrypoint: >
+      bash -c "
+        echo 'Waiting for Neo4j...' &&
+        sleep 5 &&
+        cat /seed/init_neo4j.cypher | cypher-shell -u neo4j -p localdev_password -a bolt://neo4j:7687 &&
+        echo 'Neo4j seed complete.'
+      "
+    restart: "no"
+
+  # ─── Ollama LLM Server ─────────────────────────────────────────────────────
+  ollama:
+    image: ollama/ollama:latest
+    ports: ["11434:11434"]
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 15s
+
+  # ─── Ollama Model Pull (runs once then exits) ──────────────────────────────
+  ollama-pull:
+    image: curlimages/curl:latest
+    depends_on:
+      ollama:
+        condition: service_healthy
+    entrypoint: >
+      sh -c "
+        echo 'Pulling llama3.2 model...' &&
+        curl -s http://ollama:11434/api/pull -d '{\"name\": \"llama3.2\"}' &&
+        echo 'Model pull complete.'
+      "
+    restart: "no"
+
   # ─── FastAPI Application ───────────────────────────────────────────────────
   api:
     build:
@@ -32,10 +96,20 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      ollama:
+        condition: service_healthy
     environment:
       DATABASE_URL: postgresql://cfadmin:localdev_password@postgres:5432/credit_fraud
-      MOCK_LLM: "true"
-      GRAPH_BACKEND: "mock"
+      MOCK_LLM: "false"
+      LLM_BACKEND: "ollama"
+      OLLAMA_BASE_URL: "http://ollama:11434/v1"
+      OLLAMA_MODEL: "llama3.2"
+      GRAPH_BACKEND: "neo4j"
+      NEO4J_URI: "bolt://neo4j:7687"
+      NEO4J_USER: "neo4j"
+      NEO4J_PASSWORD: "localdev_password"
       ALLOWED_ORIGINS: "http://localhost:3000"
       OPENAI_API_KEY: ${OPENAI_API_KEY:-mock-key}
     volumes:
@@ -56,3 +130,5 @@ services:
 
 volumes:
   postgres_data:
+  neo4j_data:
+  ollama_data:

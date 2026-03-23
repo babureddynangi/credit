@@ -11,8 +11,13 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 
-import psycopg2
-import psycopg2.extras
+try:
+    import psycopg2
+    import psycopg2.extras
+    HAS_PSYCOPG2 = True
+except ImportError:
+    psycopg2 = None
+    HAS_PSYCOPG2 = False
 import boto3
 
 from api.schemas.models import EvidenceBundle, LLMCaseClassification
@@ -30,6 +35,7 @@ class AuditLogger:
 
     def __init__(self):
         self.db_url      = os.environ.get("DATABASE_URL")
+        self.use_db      = bool(self.db_url) and HAS_PSYCOPG2
         self.cw_group    = os.getenv("AUDIT_LOG_GROUP", "/credit-fraud/audit")
         self.llm_group   = os.getenv("LLM_LOG_GROUP",   "/credit-fraud/llm-audit")
         self._cw_client  = None
@@ -125,6 +131,10 @@ class AuditLogger:
     # ─── Internal Write Methods ───────────────────────────────────────────────
 
     def _write_to_db(self, record: Dict[str, Any]):
+        if not self.use_db:
+            logger.info(f"[In-Memory Audit] {record['action']} for {record['entity_id']}")
+            return
+        conn = None
         try:
             conn = psycopg2.connect(self.db_url)
             with conn.cursor() as cur:
@@ -152,6 +162,9 @@ class AuditLogger:
                 conn.close()
 
     def _write_llm_log(self, case_id: str, llm_log: Dict[str, Any]):
+        if not self.use_db:
+            return
+        conn = None
         try:
             conn = psycopg2.connect(self.db_url)
             with conn.cursor() as cur:
@@ -180,6 +193,9 @@ class AuditLogger:
                 conn.close()
 
     def _log_model_scores(self, application_id: str, scores, model_version: str):
+        if not self.use_db:
+            return
+        conn = None
         try:
             conn = psycopg2.connect(self.db_url)
             with conn.cursor() as cur:

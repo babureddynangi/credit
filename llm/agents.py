@@ -22,16 +22,26 @@ from api.schemas.models import (
 logger = logging.getLogger(__name__)
 UTC = timezone.utc
 
-MOCK_LLM = os.getenv("MOCK_LLM", "false").lower() == "true"
+MOCK_LLM     = os.getenv("MOCK_LLM", "false").lower() == "true"
+LLM_BACKEND  = os.getenv("LLM_BACKEND", "openai").lower()   # "openai" | "ollama"
+OLLAMA_URL   = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434/v1")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")
 
-# Lazy client — only instantiated when actually needed (not in mock mode)
+# Lazy clients — only instantiated when actually needed (not in mock mode)
 _openai_client = None
+_ollama_client = None
 
 def _get_openai_client():
     global _openai_client
     if _openai_client is None:
         _openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
     return _openai_client
+
+def _get_ollama_client():
+    global _ollama_client
+    if _ollama_client is None:
+        _ollama_client = OpenAI(api_key="ollama", base_url=OLLAMA_URL)
+    return _ollama_client
 
 # ─── JSON Schema for OpenAI Structured Output ────────────────────────────────
 
@@ -184,6 +194,9 @@ class LLMClassificationAgent:
         if MOCK_LLM:
             return self._mock_classify(bundle), self._mock_log(bundle)
 
+        if LLM_BACKEND == "ollama":
+            return self._ollama_classify(bundle)
+
         prompt = self._build_prompt(bundle)
         prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
 
@@ -231,6 +244,90 @@ class LLMClassificationAgent:
         }
 
         return classification, log_meta
+
+    def _ollama_classify(self, bundle: EvidenceBundle) -> tuple[LLMCaseClassification, dict]:
+        """Classify using Ollama (OpenAI-compatible API). Falls back to mock on error."""
+        prompt = self._build_prompt(bundle)
+        prompt_hash = hashlib.sha256(prompt.encode()).hexdigest()
+        start = time.time()
+        try:
+            response = _get_ollama_client().chat.completions.create(
+                model=OLLAMA_MODEL,
+                messages=[
+                    {"role": "system", "content": CLASSIFICATION_SYSTEM_PROMPT},
+                    {"role": "user",   "content": prompt + "\n\nRespond with valid JSON only, matching this schema: "
+                     + json.dumps({k: v for k, v in LLM_OUTPUT_SCHEMA["properties"].items()})},
+                ],
+                temperature=0,
+                max_tokens=1500,
+            )
+            latency_ms = int((time.time() - start) * 1000)
+            raw = response.choices[0].message.content or ""
+            # Strip markdown fences if present
+            if "```" in raw:
+                raw = raw.split("```")[1]
+                if raw.startswith("json"):
+                    raw = raw[4:]
+            parsed = json.loads(raw.strip())
+            # Llama sometimes returns JSON Schema structure instead of plain values.
+            # e.g. {"type": "string", "enum": ["independent_credit_risk"]} -> "independent_credit_risk"
+            # e.g. {"type": "number", "minimum": 0, "maximum": 1, "value": 0.99} -> 0.99
+            def _unwrap(val, expected_type=None):
+                if not isinstance(val, dict):
+                    return val
+                # Numeric schema: {"type": "number", ..., "value": X}
+                if val.get("type") in ("number", "integer") and "value" in val:
+                    return val["value"]
+                # Enum schema: {"type": "string", "enum": ["value"]}
+                if "enum" in val and isinstance(val["enum"], list) and val["enum"]:
+                    return val["enum"][0]
+                # {"type": "actual_value"} where type is not a JSON schema primitive
+                t = val.get("type", "")
+                if t not in ("string", "number", "boolean", "array", "object", "integer", "null", ""):
+                    return t
+                return None
+
+            for key in ["case_type", "recommended_action", "fraud_label"]:
+                unwrapped = _unwrap(parsed.get(key))
+                if unwrapped is not None:
+                    parsed[key] = unwrapped
+
+            # Unwrap confidence if schema-wrapped
+            conf = _unwrap(parsed.get("confidence"))
+            if conf is not None:
+                parsed["confidence"] = conf
+
+            # Ensure array fields are actually lists
+            for key in ["key_reasons", "missing_evidence", "adverse_action_codes", "next_investigation_steps"]:
+                if key not in parsed or not isinstance(parsed[key], list):
+                    parsed[key] = []
+            # Ensure boolean
+            if not isinstance(parsed.get("human_review_required"), bool):
+                parsed["human_review_required"] = bool(parsed.get("human_review_required", False))
+            # Ensure confidence is float in [0,1]
+            try:
+                parsed["confidence"] = max(0.0, min(1.0, float(parsed.get("confidence", 0.7))))
+            except (TypeError, ValueError):
+                parsed["confidence"] = 0.7
+            # Ensure analyst_summary is a string
+            if not isinstance(parsed.get("analyst_summary"), str):
+                parsed["analyst_summary"] = str(parsed.get("analyst_summary", ""))
+            classification = LLMCaseClassification(**parsed)
+            if classification.case_type != CaseType.INDEPENDENT_CREDIT_RISK:
+                classification.human_review_required = True
+            log_meta = {
+                "prompt_hash":       prompt_hash,
+                "model":             OLLAMA_MODEL,
+                "input_tokens":      getattr(getattr(response, "usage", None), "prompt_tokens", len(prompt) // 4),
+                "output_tokens":     getattr(getattr(response, "usage", None), "completion_tokens", 50),
+                "latency_ms":        latency_ms,
+                "case_id":           bundle.case_id,
+                "structured_output": parsed,
+            }
+            return classification, log_meta
+        except Exception as e:
+            logger.warning(f"Ollama error for case {bundle.case_id}, falling back to mock: {e}")
+            return self._mock_classify(bundle), self._mock_log(bundle)
 
     def _mock_classify(self, bundle: EvidenceBundle) -> LLMCaseClassification:
         """Deterministic mock classification — used when MOCK_LLM=true."""

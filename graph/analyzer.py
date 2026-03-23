@@ -17,13 +17,20 @@ UTC = timezone.utc
 # In local dev:  uses neo4j driver pointing at docker neo4j
 # Toggle via GRAPH_BACKEND env var
 
-GRAPH_BACKEND = os.getenv("GRAPH_BACKEND", "neo4j")  # 'neptune' | 'neo4j' | 'mock'
+def _get_graph_backend():
+    """Read backend at call time so env changes work without module reload."""
+    return os.getenv("GRAPH_BACKEND", "neo4j")  # 'neptune' | 'neo4j' | 'mock'
 
 
-def _get_driver():
-    if GRAPH_BACKEND == "mock":
+# Keep module-level constant for backward compatibility with tests
+GRAPH_BACKEND = _get_graph_backend()
+
+
+def _get_driver(backend=None):
+    backend = backend or _get_graph_backend()
+    if backend == "mock":
         return None
-    if GRAPH_BACKEND == "neptune":
+    if backend == "neptune":
         from gremlin_python.driver.driver_remote_connection import DriverRemoteConnection
         from gremlin_python.structure.graph import Graph
         endpoint = os.environ["NEPTUNE_ENDPOINT"]
@@ -49,11 +56,18 @@ class GraphAnalyzer:
     """
 
     def __init__(self):
-        self.driver = _get_driver()
+        self._driver = None
+
+    @property
+    def driver(self):
+        if self._driver is None:
+            self._driver = _get_driver()
+        return self._driver
 
     def analyze(self, person_id: str, application_id: str) -> GraphRiskOutput:
         """Main entry point — returns full graph risk output."""
-        if GRAPH_BACKEND == "mock":
+        backend = _get_graph_backend()
+        if backend == "mock":
             return GraphRiskOutput(
                 related_parties=[],
                 household_default_count=0,
@@ -62,7 +76,7 @@ class GraphAnalyzer:
                 cluster_density=0.0,
                 graph_risk_score=0.0,
             )
-        elif GRAPH_BACKEND == "neo4j":
+        elif backend == "neo4j":
             return self._analyze_neo4j(person_id, application_id)
         else:
             return self._analyze_neptune(person_id, application_id)
@@ -286,7 +300,7 @@ class GraphAnalyzer:
 
     def upsert_person_node(self, person_id: str, attributes: Dict[str, Any]):
         """Create or update a Person node in the graph."""
-        if GRAPH_BACKEND == "neo4j":
+        if _get_graph_backend() == "neo4j":
             with self.driver.session() as session:
                 session.execute_write(lambda tx: tx.run("""
                     MERGE (p:Person {person_id: $person_id})
@@ -295,7 +309,7 @@ class GraphAnalyzer:
 
     def upsert_application_node(self, app_id: str, person_id: str, attributes: Dict[str, Any]):
         """Create Application node and link to Person."""
-        if GRAPH_BACKEND == "neo4j":
+        if _get_graph_backend() == "neo4j":
             with self.driver.session() as session:
                 session.execute_write(lambda tx: tx.run("""
                     MERGE (a:Application {application_id: $app_id})
@@ -308,7 +322,7 @@ class GraphAnalyzer:
     def link_persons(self, person_id_a: str, person_id_b: str,
                      link_type: str, shared_attributes: List[str]):
         """Create or strengthen a link between two persons."""
-        if GRAPH_BACKEND == "neo4j":
+        if _get_graph_backend() == "neo4j":
             with self.driver.session() as session:
                 session.execute_write(lambda tx: tx.run("""
                     MATCH (a:Person {person_id: $pid_a})

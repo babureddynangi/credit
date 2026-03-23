@@ -10,7 +10,15 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Optional
 
-import asyncpg
+import json as json_module
+
+try:
+    import asyncpg
+    HAS_ASYNCPG = True
+except ImportError:
+    asyncpg = None  # type: ignore
+    HAS_ASYNCPG = False
+
 from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -49,21 +57,51 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ─── Database Pool ────────────────────────────────────────────────────────────
+# ─── Database Pool / In-Memory Fallback ───────────────────────────────────────
 
-_db_pool: Optional[asyncpg.Pool] = None
+DATABASE_URL = os.getenv("DATABASE_URL", "")
+USE_DB = bool(DATABASE_URL) and HAS_ASYNCPG
 
-async def get_db() -> asyncpg.Connection:
-    global _db_pool
-    if _db_pool is None:
-        _db_pool = await asyncpg.create_pool(
-            dsn=os.environ["DATABASE_URL"],
-            min_size=5,
-            max_size=20,
-            command_timeout=30,
-        )
-    async with _db_pool.acquire() as conn:
-        yield conn
+_db_pool = None
+
+# In-memory store (used when DATABASE_URL is not set)
+_mem_store = {
+    "persons": {},       # external_id -> {person_id, full_name, ...}
+    "applications": {},  # application_id -> {person_id, ...}
+    "cases": {},         # case_id -> {case_type, status, priority, ...}
+    "rule_hits": {},     # case_id -> [hit_dicts]
+}
+
+
+class _MemConn:
+    """Minimal async interface that mirrors asyncpg.Connection for in-memory ops."""
+    async def fetchrow(self, query, *args):
+        return None  # queries handled inline
+
+    async def fetch(self, query, *args):
+        return []  # queries handled inline
+
+    async def execute(self, query, *args):
+        pass  # writes handled inline
+
+
+_mem_conn = _MemConn()
+
+
+async def get_db():
+    if USE_DB:
+        global _db_pool
+        if _db_pool is None:
+            _db_pool = await asyncpg.create_pool(
+                dsn=DATABASE_URL,
+                min_size=5,
+                max_size=20,
+                command_timeout=30,
+            )
+        async with _db_pool.acquire() as conn:
+            yield conn
+    else:
+        yield _mem_conn
 
 # ─── Service Singletons ───────────────────────────────────────────────────────
 
@@ -100,7 +138,7 @@ async def health():
 async def evaluate_application(
     intake: ApplicationIntake,
     background_tasks: BackgroundTasks,
-    db: asyncpg.Connection = Depends(get_db),
+    db = Depends(get_db),
 ):
     """
     Full end-to-end evaluation of a loan application.
@@ -205,35 +243,38 @@ async def analyst_decision(
     case_id: str,
     decision: AnalystDecision,
     background_tasks: BackgroundTasks,
-    db: asyncpg.Connection = Depends(get_db),
+    db = Depends(get_db),
 ):
     """Record a human analyst's final disposition on a case."""
-    case = await db.fetchrow(
-        "SELECT * FROM cases WHERE case_id = $1", case_id
-    )
-    if not case:
-        raise HTTPException(status_code=404, detail="Case not found")
-
-    if case["status"] in ("closed_approved", "closed_declined", "closed_fraud"):
-        raise HTTPException(status_code=409, detail="Case already closed")
-
     status_map = {
         "approved":        "closed_approved",
         "declined":        "closed_declined",
         "escalated":       "escalated",
         "fraud_confirmed": "closed_fraud",
     }
+    new_status = status_map.get(decision.disposition, decision.disposition)
 
-    new_status = status_map[decision.disposition]
-
-    await db.execute("""
-        UPDATE cases
-        SET status = $1, final_disposition = $2,
-            disposition_reason = $3, closed_at = NOW(),
-            updated_at = NOW()
-        WHERE case_id = $4
-    """, new_status, decision.disposition,
-        "; ".join(decision.reason_codes), case_id)
+    if USE_DB:
+        case = await db.fetchrow(
+            "SELECT * FROM cases WHERE case_id = $1", case_id
+        )
+        if not case:
+            raise HTTPException(status_code=404, detail="Case not found")
+        if case["status"] in ("closed_approved", "closed_declined", "closed_fraud"):
+            raise HTTPException(status_code=409, detail="Case already closed")
+        await db.execute("""
+            UPDATE cases
+            SET status = $1, final_disposition = $2,
+                disposition_reason = $3, closed_at = NOW(),
+                updated_at = NOW()
+            WHERE case_id = $4
+        """, new_status, decision.disposition,
+            "; ".join(decision.reason_codes), case_id)
+    else:
+        if case_id not in _mem_store["cases"]:
+            raise HTTPException(status_code=404, detail="Case not found")
+        _mem_store["cases"][case_id]["status"] = new_status
+        _mem_store["cases"][case_id]["final_disposition"] = decision.disposition
 
     background_tasks.add_task(
         audit_logger.log_analyst_decision,
@@ -251,29 +292,34 @@ async def analyst_decision(
 # ─── Case Retrieval ───────────────────────────────────────────────────────────
 
 @app.get("/v1/cases/{case_id}")
-async def get_case(case_id: str, db: asyncpg.Connection = Depends(get_db)):
+async def get_case(case_id: str, db = Depends(get_db)):
     """Retrieve full case with evidence bundle for analyst workbench."""
-    row = await db.fetchrow("""
-        SELECT c.*, a.loan_amount, a.fraud_label, a.operational_status,
-               a.pd_score, a.fraud_score, a.proxy_borrower_score,
-               p.full_name, p.household_id
-        FROM cases c
-        JOIN applications a ON a.application_id = c.application_id
-        JOIN persons p ON p.person_id = a.person_id
-        WHERE c.case_id = $1
-    """, case_id)
-
-    if not row:
-        raise HTTPException(status_code=404, detail="Case not found")
-
-    rule_hits = await db.fetch(
-        "SELECT * FROM rule_hits WHERE case_id = $1 ORDER BY fired_at", case_id
-    )
-
-    return {
-        "case": dict(row),
-        "rule_hits": [dict(r) for r in rule_hits],
-    }
+    if USE_DB:
+        row = await db.fetchrow("""
+            SELECT c.*, a.loan_amount, a.fraud_label, a.operational_status,
+                   a.pd_score, a.fraud_score, a.proxy_borrower_score,
+                   p.full_name, p.household_id
+            FROM cases c
+            JOIN applications a ON a.application_id = c.application_id
+            JOIN persons p ON p.person_id = a.person_id
+            WHERE c.case_id = $1
+        """, case_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Case not found")
+        rule_hits = await db.fetch(
+            "SELECT * FROM rule_hits WHERE case_id = $1 ORDER BY fired_at", case_id
+        )
+        return {
+            "case": dict(row),
+            "rule_hits": [dict(r) for r in rule_hits],
+        }
+    else:
+        if case_id not in _mem_store["cases"]:
+            raise HTTPException(status_code=404, detail="Case not found")
+        return {
+            "case": _mem_store["cases"][case_id],
+            "rule_hits": _mem_store["rule_hits"].get(case_id, []),
+        }
 
 
 @app.get("/v1/cases")
@@ -281,64 +327,96 @@ async def list_cases(
     status: Optional[str] = None,
     limit: int = 50,
     offset: int = 0,
-    db: asyncpg.Connection = Depends(get_db),
+    db = Depends(get_db),
 ):
     """List cases for analyst queue."""
-    query = """
-        SELECT c.case_id, c.case_type, c.priority, c.status,
-               c.sla_deadline, c.created_at,
-               a.loan_amount, p.full_name
-        FROM cases c
-        JOIN applications a ON a.application_id = c.application_id
-        JOIN persons p ON p.person_id = a.person_id
-        {where}
-        ORDER BY c.priority ASC, c.created_at ASC
-        LIMIT $1 OFFSET $2
-    """
-    if status:
-        rows = await db.fetch(
-            query.format(where="WHERE c.status = $3"),
-            limit, offset, status
-        )
+    if USE_DB:
+        query = """
+            SELECT c.case_id, c.case_type, c.priority, c.status,
+                   c.sla_deadline, c.created_at,
+                   a.loan_amount, p.full_name
+            FROM cases c
+            JOIN applications a ON a.application_id = c.application_id
+            JOIN persons p ON p.person_id = a.person_id
+            {where}
+            ORDER BY c.priority ASC, c.created_at ASC
+            LIMIT $1 OFFSET $2
+        """
+        if status:
+            rows = await db.fetch(
+                query.format(where="WHERE c.status = $3"),
+                limit, offset, status
+            )
+        else:
+            rows = await db.fetch(
+                query.format(where="WHERE c.status NOT IN ('closed_approved','closed_declined','closed_fraud')"),
+                limit, offset
+            )
+        return {"cases": [dict(r) for r in rows], "total": len(rows)}
     else:
-        rows = await db.fetch(
-            query.format(where="WHERE c.status NOT IN ('closed_approved','closed_declined','closed_fraud')"),
-            limit, offset
-        )
-    return {"cases": [dict(r) for r in rows], "total": len(rows)}
+        closed = {"closed_approved", "closed_declined", "closed_fraud"}
+        cases = list(_mem_store["cases"].values())
+        if status:
+            cases = [c for c in cases if c.get("status") == status]
+        else:
+            cases = [c for c in cases if c.get("status") not in closed]
+        cases.sort(key=lambda c: (c.get("priority", 50), c.get("created_at", "")))
+        return {"cases": cases[offset:offset+limit], "total": len(cases)}
 
 
 # ─── Helper Functions ─────────────────────────────────────────────────────────
 
-async def _upsert_person(db: asyncpg.Connection, intake: ApplicationIntake) -> str:
+async def _upsert_person(db, intake: ApplicationIntake) -> str:
     ssn_hash = hashlib.sha256(intake.ssn_last4.encode()).hexdigest()
-    existing = await db.fetchrow(
-        "SELECT person_id FROM persons WHERE external_id = $1", intake.external_person_id
-    )
-    if existing:
-        return str(existing["person_id"])
-
-    person_id = str(uuid.uuid4())
-    await db.execute("""
-        INSERT INTO persons (person_id, external_id, full_name, ssn_hash, dob)
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (external_id) DO UPDATE SET full_name = $3, updated_at = NOW()
-    """, person_id, intake.external_person_id, intake.full_name, ssn_hash, intake.dob)
-    return person_id
+    if USE_DB:
+        existing = await db.fetchrow(
+            "SELECT person_id FROM persons WHERE external_id = $1", intake.external_person_id
+        )
+        if existing:
+            return str(existing["person_id"])
+        person_id = str(uuid.uuid4())
+        await db.execute("""
+            INSERT INTO persons (person_id, external_id, full_name, ssn_hash, dob)
+            VALUES ($1, $2, $3, $4, $5)
+            ON CONFLICT (external_id) DO UPDATE SET full_name = $3, updated_at = NOW()
+        """, person_id, intake.external_person_id, intake.full_name, ssn_hash, intake.dob)
+        return person_id
+    else:
+        if intake.external_person_id in _mem_store["persons"]:
+            return _mem_store["persons"][intake.external_person_id]["person_id"]
+        person_id = str(uuid.uuid4())
+        _mem_store["persons"][intake.external_person_id] = {
+            "person_id": person_id,
+            "external_id": intake.external_person_id,
+            "full_name": intake.full_name,
+            "ssn_hash": ssn_hash,
+        }
+        return person_id
 
 
 async def _store_application(
-    db: asyncpg.Connection, app_id: str, person_id: str, intake: ApplicationIntake
+    db, app_id: str, person_id: str, intake: ApplicationIntake
 ):
-    await db.execute("""
-        INSERT INTO applications
-            (application_id, person_id, external_app_id, loan_amount,
-             loan_purpose, declared_income, submitted_at, bureau_score)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-        ON CONFLICT (external_app_id) DO NOTHING
-    """, app_id, person_id, intake.external_app_id, intake.loan_amount,
-        intake.loan_purpose, intake.declared_income,
-        intake.submitted_at, intake.bureau_score)
+    if USE_DB:
+        await db.execute("""
+            INSERT INTO applications
+                (application_id, person_id, external_app_id, loan_amount,
+                 loan_purpose, declared_income, submitted_at, bureau_score)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+            ON CONFLICT (external_app_id) DO NOTHING
+        """, app_id, person_id, intake.external_app_id, intake.loan_amount,
+            intake.loan_purpose, intake.declared_income,
+            intake.submitted_at, intake.bureau_score)
+    else:
+        _mem_store["applications"][app_id] = {
+            "application_id": app_id,
+            "person_id": person_id,
+            "loan_amount": float(intake.loan_amount),
+            "loan_purpose": intake.loan_purpose,
+            "declared_income": float(intake.declared_income),
+            "submitted_at": intake.submitted_at.isoformat(),
+            "bureau_score": intake.bureau_score,
+        }
 
 
 async def _get_ml_scores(
@@ -444,36 +522,67 @@ def _build_evidence_bundle(
 
 
 async def _store_case(
-    db: asyncpg.Connection,
+    db,
     case_id: str,
     application_id: str,
     classification: LLMCaseClassification,
     bundle: EvidenceBundle,
     policy_output: dict,
 ):
-    import json
     from datetime import timedelta
 
     sla_deadline = datetime.now(UTC) + timedelta(hours=policy_output["sla_hours"])
+    status_val = "manual_review" if policy_output["human_review_required"] else "open"
 
-    await db.execute("""
-        INSERT INTO cases
-            (case_id, application_id, case_type, priority,
-             sla_deadline, status, llm_classification, evidence_bundle)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-    """, case_id, application_id, classification.case_type.value,
-        policy_output["priority"], sla_deadline,
-        "manual_review" if policy_output["human_review_required"] else "open",
-        json.dumps(classification.dict()),
-        json.dumps(bundle.dict(exclude={"rule_hits", "related_parties"})),
-    )
-
-    # Store rule hits
-    for hit in bundle.rule_hits:
+    if USE_DB:
         await db.execute("""
-            INSERT INTO rule_hits
-                (hit_id, case_id, rule_code, rule_description, severity, evidence_data)
-            VALUES ($1,$2,$3,$4,$5,$6)
-        """, str(uuid.uuid4()), case_id, hit.rule_code,
-            hit.description, hit.severity.value,
-            json.dumps(hit.evidence))
+            INSERT INTO cases
+                (case_id, application_id, case_type, priority,
+                 sla_deadline, status, llm_classification, evidence_bundle)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+        """, case_id, application_id, classification.case_type.value,
+            policy_output["priority"], sla_deadline,
+            status_val,
+            json_module.dumps(classification.dict()),
+            json_module.dumps(bundle.dict(exclude={"rule_hits", "related_parties"})),
+        )
+        for hit in bundle.rule_hits:
+            await db.execute("""
+                INSERT INTO rule_hits
+                    (hit_id, case_id, rule_code, rule_description, severity, evidence_data)
+                VALUES ($1,$2,$3,$4,$5,$6)
+            """, str(uuid.uuid4()), case_id, hit.rule_code,
+                hit.description, hit.severity.value,
+                json_module.dumps(hit.evidence))
+    else:
+        # Find the person info from the application
+        app_data = _mem_store["applications"].get(application_id, {})
+        person_id = app_data.get("person_id", "")
+        person_data = {}
+        for p in _mem_store["persons"].values():
+            if p["person_id"] == person_id:
+                person_data = p
+                break
+
+        _mem_store["cases"][case_id] = {
+            "case_id": case_id,
+            "application_id": application_id,
+            "case_type": classification.case_type.value,
+            "priority": policy_output["priority"],
+            "status": status_val,
+            "sla_deadline": sla_deadline.isoformat(),
+            "created_at": datetime.now(UTC).isoformat(),
+            "loan_amount": app_data.get("loan_amount", 0),
+            "full_name": person_data.get("full_name", "Unknown"),
+            "llm_classification": classification.dict(),
+            "scores": bundle.scores.dict() if bundle.scores else {},
+        }
+        hits = []
+        for hit in bundle.rule_hits:
+            hits.append({
+                "rule_code": hit.rule_code,
+                "rule_description": hit.description,
+                "severity": hit.severity.value,
+                "evidence_data": hit.evidence,
+            })
+        _mem_store["rule_hits"][case_id] = hits

@@ -1,6 +1,11 @@
 import { useState, useEffect, useCallback } from "react";
 
-// ─── Mock data for demo (replace with API calls) ──────────────────────────────
+// ─── API Configuration ────────────────────────────────────────────────────────
+const API_URL = typeof import.meta !== "undefined" && import.meta.env?.VITE_API_URL
+  ? import.meta.env.VITE_API_URL
+  : "http://localhost:8000";
+
+// ─── Fallback mock data (used when API is unreachable) ────────────────────────
 const MOCK_CASES = [
   {
     case_id: "C-2024-001",
@@ -95,6 +100,48 @@ const MOCK_CASES = [
   },
 ];
 
+// ─── Transform API response to component shape ───────────────────────────────
+
+function transformApiCase(apiCase, ruleHits = []) {
+  const c = apiCase;
+  const cls = c.llm_classification || {};
+  const scores = c.scores || {};
+
+  return {
+    case_id: c.case_id,
+    applicant_name: c.full_name || cls.analyst_summary?.match(/Case .+ — /)?.[0]?.slice(5, -3) || "Unknown",
+    loan_amount: c.loan_amount || 0,
+    case_type: c.case_type || cls.case_type || "independent_credit_risk",
+    status: c.status || "open",
+    priority: c.priority || 50,
+    fraud_score: scores.fraud_score ?? c.fraud_score ?? 0,
+    pd_score: scores.pd_score ?? c.pd_score ?? 0,
+    proxy_score: scores.proxy_borrower_score ?? c.proxy_borrower_score ?? 0,
+    created_at: c.created_at || new Date().toISOString(),
+    sla_deadline: c.sla_deadline || new Date().toISOString(),
+    related_party: "See evidence bundle",
+    key_reasons: cls.key_reasons || ["Loaded from live API"],
+    rule_hits: (ruleHits || []).map(h => ({
+      code: h.rule_code,
+      severity: h.severity,
+      desc: h.rule_description || h.description || h.rule_code,
+    })),
+    timeline: [
+      { date: new Date(c.created_at || Date.now()).toISOString().split("T")[0], event: "Case created", type: "application" },
+    ],
+    graph_metrics: {
+      household_defaults: 0,
+      cluster_density: 0,
+      path_to_defaulter: null,
+      fund_flow: false,
+    },
+    analyst_summary: cls.analyst_summary || "Loaded from live API — expand case for full details.",
+    missing_evidence: cls.missing_evidence || [],
+    adverse_action_codes: cls.adverse_action_codes || [],
+    recommended_action: cls.recommended_action || c.operational_status || "manual_review",
+  };
+}
+
 const SEVERITY_COLORS = {
   critical: "#ef4444",
   warning:  "#f59e0b",
@@ -107,6 +154,11 @@ const STATUS_COLORS = {
   open:             { bg: "#dbeafe", text: "#1e40af", border: "#93c5fd" },
   approved:         { bg: "#d1fae5", text: "#065f46", border: "#6ee7b7" },
   hold:             { bg: "#f3e8ff", text: "#6b21a8", border: "#c084fc" },
+  in_review:        { bg: "#fef3c7", text: "#92400e", border: "#fbbf24" },
+  closed_approved:  { bg: "#d1fae5", text: "#065f46", border: "#6ee7b7" },
+  closed_declined:  { bg: "#fee2e2", text: "#991b1b", border: "#f87171" },
+  closed_fraud:     { bg: "#fee2e2", text: "#991b1b", border: "#f87171" },
+  escalated:        { bg: "#f3e8ff", text: "#6b21a8", border: "#c084fc" },
 };
 
 const CASE_TYPE_LABELS = {
@@ -175,6 +227,26 @@ function Timeline({ events }) {
   );
 }
 
+// ─── Connection Status Badge ──────────────────────────────────────────────────
+
+function ConnectionBadge({ connected, loading }) {
+  if (loading) return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, color: "#f59e0b" }}>
+      <div style={{ width: 6, height: 6, borderRadius: "50%", background: "#f59e0b",
+                    animation: "pulse 1.5s infinite" }} />
+      CONNECTING...
+    </div>
+  );
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10,
+                  color: connected ? "#22c55e" : "#ef4444" }}>
+      <div style={{ width: 6, height: 6, borderRadius: "50%",
+                    background: connected ? "#22c55e" : "#ef4444" }} />
+      {connected ? "LIVE API" : "OFFLINE (MOCK)"}
+    </div>
+  );
+}
+
 // ─── Case Card Component ──────────────────────────────────────────────────────
 
 function CaseCard({ c, selected, onClick }) {
@@ -201,7 +273,7 @@ function CaseCard({ c, selected, onClick }) {
           <span style={{
             fontSize: 11, padding: "3px 8px", borderRadius: 4, fontWeight: 600,
             background: statusStyle.bg, color: statusStyle.text, border: `1px solid ${statusStyle.border}`
-          }}>{c.status.replace("_", " ").toUpperCase()}</span>
+          }}>{c.status.replace(/_/g, " ").toUpperCase()}</span>
         </div>
       </div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -240,15 +312,31 @@ function CaseDetail({ c, onDecision }) {
     </div>
   );
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (!disposition) return;
     setSubmitting(true);
-    setTimeout(() => {
-      onDecision(c.case_id, disposition, notes);
-      setSubmitting(false);
-      setDisposition("");
-      setNotes("");
-    }, 600);
+    try {
+      // Try live API first
+      const resp = await fetch(`${API_URL}/v1/cases/${c.case_id}/decision`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          case_id: c.case_id,
+          analyst_id: "analyst-001",
+          disposition,
+          reason_codes: [disposition],
+          notes: notes || undefined,
+          override_llm: false,
+        }),
+      });
+      if (!resp.ok) throw new Error("API error");
+    } catch {
+      // Fallback: update locally
+    }
+    onDecision(c.case_id, disposition, notes);
+    setSubmitting(false);
+    setDisposition("");
+    setNotes("");
   };
 
   const tabs = ["evidence", "timeline", "scores", "decision"];
@@ -443,7 +531,7 @@ function CaseDetail({ c, onDecision }) {
                           padding: 14, marginBottom: 24 }}>
               <div style={{ fontSize: 13, color: "#94a3b8", marginBottom: 4 }}>Recommended Action</div>
               <div style={{ fontSize: 18, fontWeight: 800, color: "#f59e0b", textTransform: "uppercase" }}>
-                {c.recommended_action.replace("_", " ")}
+                {c.recommended_action.replace(/_/g, " ")}
               </div>
             </div>
 
@@ -508,11 +596,61 @@ function CaseDetail({ c, onDecision }) {
 // ─── Main App ─────────────────────────────────────────────────────────────────
 
 export default function App() {
-  const [cases, setCases]       = useState(MOCK_CASES);
-  const [selected, setSelected] = useState(null);
-  const [filter, setFilter]     = useState("all");
-  const [search, setSearch]     = useState("");
-  const [toast, setToast]       = useState(null);
+  const [cases, setCases]           = useState([]);
+  const [selected, setSelected]     = useState(null);
+  const [filter, setFilter]         = useState("all");
+  const [search, setSearch]         = useState("");
+  const [toast, setToast]           = useState(null);
+  const [apiConnected, setApiConnected] = useState(false);
+  const [loading, setLoading]       = useState(true);
+
+  // ─── Fetch cases from live API ──────────────────────────────────────────────
+  const fetchCases = useCallback(async () => {
+    try {
+      const resp = await fetch(`${API_URL}/v1/cases?limit=100`);
+      if (!resp.ok) throw new Error(`API ${resp.status}`);
+      const data = await resp.json();
+      const liveCases = (data.cases || []).map(c => transformApiCase(c));
+      if (liveCases.length > 0) {
+        setCases(liveCases);
+        setApiConnected(true);
+      } else {
+        // API reachable but no cases — show mock for demo
+        setCases(MOCK_CASES);
+        setApiConnected(true);
+      }
+    } catch {
+      // API unreachable — fall back to mock data
+      setCases(MOCK_CASES);
+      setApiConnected(false);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchCases();
+    // Poll every 30 seconds for new cases
+    const interval = setInterval(fetchCases, 30000);
+    return () => clearInterval(interval);
+  }, [fetchCases]);
+
+  // ─── Fetch case detail when selected ────────────────────────────────────────
+  const handleSelectCase = useCallback(async (c) => {
+    setSelected(c);
+    if (apiConnected) {
+      try {
+        const resp = await fetch(`${API_URL}/v1/cases/${c.case_id}`);
+        if (resp.ok) {
+          const data = await resp.json();
+          const detailed = transformApiCase(data.case, data.rule_hits);
+          setSelected(detailed);
+        }
+      } catch {
+        // Keep the summary version
+      }
+    }
+  }, [apiConnected]);
 
   const showToast = (msg, color = "#22c55e") => {
     setToast({ msg, color });
@@ -522,13 +660,15 @@ export default function App() {
   const handleDecision = (caseId, disposition, notes) => {
     setCases(prev => prev.map(c =>
       c.case_id === caseId
-        ? { ...c, status: disposition === "approved" ? "approved"
-                         : disposition === "declined" ? "declined"
-                         : disposition === "escalated" ? "fraud_escalation"
-                         : "closed" }
+        ? { ...c, status: disposition === "approved" ? "closed_approved"
+                         : disposition === "declined" ? "closed_declined"
+                         : disposition === "escalated" ? "escalated"
+                         : "closed_fraud" }
         : c
     ));
-    showToast(`Case ${caseId}: ${disposition.replace("_", " ")} recorded`);
+    showToast(`Case ${caseId}: ${disposition.replace(/_/g, " ")} recorded`);
+    // Refresh after 2s to pick up server-side changes
+    setTimeout(fetchCases, 2000);
   };
 
   const filtered = cases.filter(c => {
@@ -541,8 +681,8 @@ export default function App() {
   const stats = {
     total:       cases.length,
     highRisk:    cases.filter(c => c.fraud_score >= 0.65 || c.proxy_score >= 0.7).length,
-    review:      cases.filter(c => c.status === "manual_review").length,
-    escalated:   cases.filter(c => c.status === "fraud_escalation").length,
+    review:      cases.filter(c => ["manual_review", "in_review"].includes(c.status)).length,
+    escalated:   cases.filter(c => ["fraud_escalation", "escalated"].includes(c.status)).length,
   };
 
   return (
@@ -567,8 +707,11 @@ export default function App() {
 
         {/* Logo / Header */}
         <div style={{ padding: "20px 20px 16px", borderBottom: "1px solid #0f172a" }}>
-          <div style={{ fontSize: 11, color: "#3b82f6", fontWeight: 700, letterSpacing: 2, marginBottom: 4 }}>
-            CREDIT FRAUD PLATFORM
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 4 }}>
+            <div style={{ fontSize: 11, color: "#3b82f6", fontWeight: 700, letterSpacing: 2 }}>
+              CREDIT FRAUD PLATFORM
+            </div>
+            <ConnectionBadge connected={apiConnected} loading={loading} />
           </div>
           <div style={{ fontSize: 18, fontWeight: 800, color: "#f8fafc", letterSpacing: -0.5 }}>
             Analyst Workbench
@@ -616,14 +759,31 @@ export default function App() {
                 background:  filter === f ? "#1e3a5f" : "transparent",
                 color:       filter === f ? "#93c5fd" : "#475569",
               }}>
-              {f.replace("_", " ").toUpperCase()}
+              {f.replace(/_/g, " ").toUpperCase()}
             </button>
           ))}
         </div>
 
+        {/* Refresh Button */}
+        <div style={{ padding: "0 16px 8px" }}>
+          <button onClick={fetchCases}
+            style={{
+              width: "100%", padding: "6px", fontSize: 10, borderRadius: 4,
+              cursor: "pointer", border: "1px solid #1e293b", fontWeight: 600,
+              fontFamily: "inherit", background: "#0a1628", color: "#64748b",
+              transition: "all 0.15s",
+            }}>
+            ↻ REFRESH CASES
+          </button>
+        </div>
+
         {/* Case List */}
         <div style={{ flex: 1, overflow: "auto", padding: "0 12px 12px" }}>
-          {filtered.length === 0 ? (
+          {loading ? (
+            <div style={{ color: "#334155", fontSize: 13, textAlign: "center", padding: 20 }}>
+              Loading cases...
+            </div>
+          ) : filtered.length === 0 ? (
             <div style={{ color: "#334155", fontSize: 13, textAlign: "center", padding: 20 }}>
               No cases match filter
             </div>
@@ -631,7 +791,7 @@ export default function App() {
             filtered.map(c => (
               <CaseCard key={c.case_id} c={c}
                 selected={selected?.case_id === c.case_id}
-                onClick={setSelected} />
+                onClick={handleSelectCase} />
             ))
           )}
         </div>
@@ -649,6 +809,7 @@ export default function App() {
         ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 3px; }
         textarea:focus, input:focus { outline: 1px solid #3b82f6; }
         @keyframes fadeIn { from { opacity: 0; transform: translateY(-8px); } to { opacity: 1; transform: translateY(0); } }
+        @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
       `}</style>
     </div>
   );
