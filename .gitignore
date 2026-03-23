@@ -30,6 +30,11 @@ infrastructure/terraform/*.tfstate
 infrastructure/terraform/*.tfstate.backup
 infrastructure/terraform/.terraform.lock.hcl
 
+# Large result files
+results/*.csv
+results/*.json
+results/*.txt
+
 # IDE
 .vscode/
 .idea/
